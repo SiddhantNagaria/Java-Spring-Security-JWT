@@ -1,0 +1,256 @@
+=========================
+= 1) LOGIN FLOW (JWT)   =
+=========================
+
+Client (Postman / Browser)
+        |
+        |  POST /auth/login
+        |  Body: { "email": "...", "password": "..." }
+        v
++------------------------------+
+|  Security Filter Chain       |
+|  (from SecurityConfig)       |
++------------------------------+
+        |
+        |  runs JwtAuthenticationFilter
+        v
++------------------------------+
+| JwtAuthenticationFilter      |
+| doFilterInternal()           |
++------------------------------+
+        |
+        |  No Authorization header -> no JWT -> just continue
+        v
++------------------------------+
+| DispatcherServlet            |
++------------------------------+
+        |
+        |  maps /auth/login
+        v
++------------------------------+
+| AuthController               |
+| @PostMapping("/login")       |
++------------------------------+
+        |
+        |  login(request)
+        |    -> doAuthenticate(email, password)
+        v
++------------------------------+
+| doAuthenticate()             |
+| (inside AuthController)      |
++------------------------------+
+        |
+        |  creates UsernamePasswordAuthenticationToken
+        |  calls manager.authenticate(token)
+        v
++------------------------------+
+| AuthenticationManager        |
++------------------------------+
+        |
+        | uses UserDetailsService
+        v
++------------------------------+
+| InMemoryUserDetailsManager   |
+| (from AppConfig.userDetailsService) |
++------------------------------+
+        |
+        |  loadUserByUsername(email)
+        |  finds in-memory UserDetails:
+        |     username: "root"/"admin"
+        |     password: BCrypt hash
+        |
+        |  AuthenticationManager compares:
+        |     raw password vs BCrypt hash
+        v
++------------------------------+
+| Authentication success       |
++------------------------------+
+        |
+        | return to doAuthenticate()
+        v
++------------------------------+
+| AuthController.login()       |
++------------------------------+
+        |
+        | userDetails = userDetailsService.loadUserByUsername(email)
+        v
++------------------------------+
+| InMemoryUserDetailsManager   |
+| loadUserByUsername() again   |
++------------------------------+
+        |
+        | return UserDetails
+        v
++------------------------------+
+| AuthController.login()       |
++------------------------------+
+        |
+        | token = jwtUtil.generateToken(userDetails)
+        v
++------------------------------+
+| JwtUtil                      |
+| generateToken(UserDetails)   |
++------------------------------+
+        |
+        |  builds JWT:
+        |    subject = username
+        |    issuedAt, expiration
+        |    signWith(secret, HS512)
+        |
+        | returns String token
+        v
++------------------------------+
+| AuthController.login()       |
++------------------------------+
+        |
+        | build JwtResponse { jwtToken, username }
+        | return ResponseEntity<JwtResponse>
+        v
+Client receives:
+{
+  "jwtToken": "eyJhbGciOiJIUzUxMiJ9...",
+  "username": "root"
+}
+
+
+
+==========================================
+= 2) ACCESS PROTECTED ENDPOINT WITH JWT  =
+==========================================
+
+Client
+        |
+        |  GET /home/users
+        |  Header: Authorization: Bearer <JWT_TOKEN>
+        v
++------------------------------+
+| Security Filter Chain        |
++------------------------------+
+        |
+        | runs JwtAuthenticationFilter
+        v
++------------------------------+
+| JwtAuthenticationFilter      |
+| doFilterInternal()           |
++------------------------------+
+        |
+        | read "Authorization" header
+        | token = header.substring(7)
+        | username = jwtUtil.getUsernameFromToken(token)
+        v
++------------------------------+
+| JwtUtil                      |
+| getUsernameFromToken(token)  |
++------------------------------+
+        |
+        | parse token with secret
+        | extract subject (username)
+        v
++------------------------------+
+| JwtAuthenticationFilter      |
++------------------------------+
+        |
+        | username != null AND
+        | SecurityContext empty ->
+        |   userDetails = userDetailsService.loadUserByUsername(username)
+        v
++------------------------------+
+| InMemoryUserDetailsManager   |
+| loadUserByUsername()         |
++------------------------------+
+        |
+        | return UserDetails
+        v
++------------------------------+
+| JwtAuthenticationFilter      |
++------------------------------+
+        |
+        | validateToken = jwtUtil.validateToken(token, userDetails)
+        v
++------------------------------+
+| JwtUtil                      |
+| validateToken()              |
++------------------------------+
+        |
+        |  compare username & expiry
+        |  return true if valid
+        v
++------------------------------+
+| JwtAuthenticationFilter      |
++------------------------------+
+        |
+        | create UsernamePasswordAuthenticationToken(
+        |      principal = userDetails,
+        |      credentials = null,
+        |      authorities = roles
+        | )
+        | set details (request info)
+        |
+        | SecurityContextHolder.getContext()
+        |      .setAuthentication(authentication)
+        v
++------------------------------+
+| SecurityContextHolder        |
+| (now holds authenticated user) |
++------------------------------+
+        |
+        | filterChain.doFilter(request, response)
+        v
++------------------------------+
+| DispatcherServlet            |
++------------------------------+
+        |
+        |  maps /home/users
+        v
++------------------------------+
+| HomeController               |
+| @GetMapping("/users")        |
++------------------------------+
+        |
+        |  userService.getUsers()
+        v
++------------------------------+
+| UserService                  |
++------------------------------+
+        |
+        | return in-memory List<User>
+        v
++------------------------------+
+| HomeController               |
++------------------------------+
+        |
+        | return list as response body
+        v
+Client receives protected data
+(only because JWT was valid and
+SecurityContext had an authenticated user)
+
+
+
+==========================================
+= 3) /home/current-user WITH JWT          =
+==========================================
+
+Client
+        |
+        |  GET /home/current-user
+        |  Header: Authorization: Bearer <JWT_TOKEN>
+        v
+[ SAME FILTER FLOW as above:
+  JwtAuthenticationFilter -> JwtUtil -> UserDetailsService
+  -> SecurityContextHolder.setAuthentication()
+]
+        |
+        v
++------------------------------+
+| HomeController               |
+| @GetMapping("/current-user") |
++------------------------------+
+        |
+        | method parameter: Principal principal
+        | Spring builds Principal from SecurityContext
+        |
+        | return principal.getName()
+        v
+Client receives:
+"root"   (or "admin", etc.)
